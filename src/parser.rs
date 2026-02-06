@@ -104,7 +104,7 @@ impl CronExpression {
             if self.matches(&current) {
                 return Some(current);
             }
-            current = current + Duration::minutes(1);
+            current += Duration::minutes(1);
         }
 
         None

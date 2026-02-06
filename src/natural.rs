@@ -122,7 +122,7 @@ fn try_parse_english(input: &str) -> Option<String> {
     if input.contains("month") {
         let day = extract_ordinal(input).unwrap_or(1);
         let (hour, minute) = extract_time_english(input).unwrap_or((0, 0));
-        if day >= 1 && day <= 31 {
+        if (1..=31).contains(&day) {
             return Some(format!("{} {} {} * *", minute, hour, day));
         }
     }
@@ -350,7 +350,7 @@ fn try_parse_chinese(input: &str) -> Option<String> {
     if input.contains("月") && (input.contains("号") || input.contains("日")) {
         let day = extract_chinese_day(input).unwrap_or(1);
         let (hour, minute) = extract_chinese_time(input).unwrap_or((0, 0));
-        if day >= 1 && day <= 31 {
+        if (1..=31).contains(&day) {
             return Some(format!("{} {} {} * *", minute, hour, day));
         }
     }
