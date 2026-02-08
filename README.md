@@ -161,6 +161,41 @@ a3s-cron/
 └── Cargo.toml
 ```
 
+## Roadmap
+
+### Phase 1: Core ✅
+
+- [x] Standard 5-field cron expression parsing
+- [x] Natural language schedule parsing (English + Chinese)
+- [x] JSON file-based persistence with pluggable backends
+- [x] CRUD operations (create, pause, resume, update, remove)
+- [x] Execution history tracking with output and status
+- [x] CLI integration via a3s-tools
+- [x] 71 comprehensive unit tests
+
+### Phase 2: Distributed Scheduling 📋
+
+- [ ] **Cluster-aware Scheduling**: Multi-node job distribution
+  - [ ] Leader election for scheduler coordination (etcd / NATS)
+  - [ ] Job assignment with node affinity and load balancing
+  - [ ] Failover: automatic job reassignment on node failure
+  - [ ] Exactly-once execution guarantee (distributed lock)
+- [ ] **Advanced Scheduling Strategies**:
+  - [ ] Job dependency chains (Job B runs after Job A completes)
+  - [ ] Conditional execution (run only if previous job succeeded/failed)
+  - [ ] Job groups with shared concurrency limits
+  - [ ] Backfill: catch up missed executions after downtime
+- [ ] **Observability**:
+  - [ ] OpenTelemetry spans for job execution lifecycle
+  - [ ] Span: `a3s.cron.execute` with attributes: job_id, job_name, schedule, duration_ms
+  - [ ] Metrics: `a3s_cron_job_duration_seconds{job}` histogram
+  - [ ] Metrics: `a3s_cron_job_failures_total{job}` counter
+  - [ ] Metrics: `a3s_cron_missed_executions_total{job}` counter
+- [ ] **Storage Backends**:
+  - [ ] Redis backend for distributed state
+  - [ ] PostgreSQL backend for durable persistence
+  - [ ] Migration tool between storage backends
+
 ## License
 
 MIT
