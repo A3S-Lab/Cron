@@ -1,6 +1,6 @@
 [package]
 name = "a3s-cron"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Cron scheduling library for A3S with natural language support"
 license = "MIT"
