@@ -32,6 +32,7 @@ pub mod natural;
 mod parser;
 mod scheduler;
 mod store;
+pub mod telemetry;
 mod types;
 
 pub use natural::parse_natural;

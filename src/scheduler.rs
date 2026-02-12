@@ -4,10 +4,12 @@
 
 use crate::parser::CronExpression;
 use crate::store::{CronStore, FileCronStore};
+use crate::telemetry;
 use crate::types::{CronError, CronJob, JobExecution, JobStatus, Result};
 use chrono::Utc;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::process::Command;
 use tokio::sync::{broadcast, RwLock};
 use tokio::time::{interval, Duration};
@@ -227,6 +229,16 @@ impl CronManager {
 
     /// Execute a job
     async fn execute_job(&self, job: &CronJob) -> Result<JobExecution> {
+        let span = tracing::info_span!(
+            "a3s.cron.execute_job",
+            a3s.cron.job_id = %job.id,
+            a3s.cron.job_name = %job.name,
+            a3s.cron.job_status = tracing::field::Empty,
+            a3s.cron.job_duration_ms = tracing::field::Empty,
+        );
+        let _guard = span.enter();
+        let exec_start = Instant::now();
+
         let mut execution = JobExecution::new(&job.id);
 
         // Emit start event
@@ -307,6 +319,19 @@ impl CronManager {
 
         self.store.save_job(&updated_job).await?;
 
+        // Record telemetry
+        let duration = exec_start.elapsed();
+        let status_str = if execution.status == crate::types::ExecutionStatus::Success {
+            "success"
+        } else if execution.status == crate::types::ExecutionStatus::Timeout {
+            "timeout"
+        } else {
+            "failed"
+        };
+        span.record(telemetry::ATTR_JOB_STATUS, status_str);
+        span.record(telemetry::ATTR_JOB_DURATION_MS, duration.as_millis() as i64);
+        telemetry::record_job_execution(&job.name, status_str, duration.as_secs_f64());
+
         Ok(execution)
     }
 
@@ -332,6 +357,7 @@ impl CronManager {
 
             loop {
                 ticker.tick().await;
+                telemetry::record_scheduler_tick();
 
                 // Check if still running
                 if !*running.read().await {
