@@ -18,8 +18,8 @@ thiserror = "1"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
 async-trait = "0.1"
-opentelemetry = { workspace = true }
-opentelemetry_sdk = { workspace = true }
+opentelemetry = { version = "0.21", features = ["metrics"] }
+opentelemetry_sdk = { version = "0.21", features = ["rt-tokio"] }
 
 [dev-dependencies]
 tempfile = "3"

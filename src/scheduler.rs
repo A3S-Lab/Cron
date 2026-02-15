@@ -5,7 +5,7 @@
 use crate::parser::CronExpression;
 use crate::store::{CronStore, FileCronStore};
 use crate::telemetry;
-use crate::types::{CronError, CronJob, JobExecution, JobStatus, Result};
+use crate::types::{AgentExecutor, AgentJobConfig, CronError, CronJob, JobExecution, JobStatus, JobType, Result};
 use chrono::Utc;
 use std::path::Path;
 use std::sync::Arc;
@@ -54,6 +54,8 @@ pub struct CronManager {
     running: Arc<RwLock<bool>>,
     /// Workspace directory
     workspace: String,
+    /// Optional agent executor for agent-mode jobs
+    agent_executor: Option<Arc<dyn AgentExecutor>>,
 }
 
 impl CronManager {
@@ -68,6 +70,7 @@ impl CronManager {
             event_tx,
             running: Arc::new(RwLock::new(false)),
             workspace: workspace_str,
+            agent_executor: None,
         })
     }
 
@@ -79,7 +82,13 @@ impl CronManager {
             event_tx,
             running: Arc::new(RwLock::new(false)),
             workspace,
+            agent_executor: None,
         }
+    }
+
+    /// Set the agent executor for agent-mode cron jobs.
+    pub fn set_agent_executor(&mut self, executor: Arc<dyn AgentExecutor>) {
+        self.agent_executor = Some(executor);
     }
 
     /// Subscribe to scheduler events
@@ -106,6 +115,35 @@ impl CronManager {
         self.store.save_job(&job).await?;
 
         tracing::info!("Added cron job: {} ({})", job.name, job.id);
+        Ok(job)
+    }
+
+    /// Add a new agent-mode cron job.
+    ///
+    /// The `command` field is used as the agent prompt. When the job fires,
+    /// it creates a temporary Agent with the given config and sends the prompt.
+    pub async fn add_agent_job(
+        &self,
+        name: &str,
+        schedule: &str,
+        prompt: &str,
+        config: AgentJobConfig,
+    ) -> Result<CronJob> {
+        let expr = CronExpression::parse(schedule)?;
+
+        if self.store.find_job_by_name(name).await?.is_some() {
+            return Err(CronError::JobExists(name.to_string()));
+        }
+
+        let mut job = CronJob::new(name, schedule, prompt);
+        job.job_type = JobType::Agent;
+        job.agent_config = Some(config);
+        job.next_run = expr.next_after(Utc::now());
+        job.working_dir = Some(self.workspace.clone());
+
+        self.store.save_job(&job).await?;
+
+        tracing::info!("Added agent cron job: {} ({})", job.name, job.id);
         Ok(job)
     }
 
@@ -256,26 +294,58 @@ impl CronManager {
         let timeout = Duration::from_millis(job.timeout_ms);
         let working_dir = job.working_dir.as_deref().unwrap_or(&self.workspace);
 
-        let result = tokio::time::timeout(timeout, async {
-            let output = Command::new("sh")
-                .arg("-c")
-                .arg(&job.command)
-                .current_dir(working_dir)
-                .envs(job.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
-                .output()
-                .await;
+        // Result type: Ok(Ok((exit_code, stdout, stderr))) or Ok(Err(io_err)) or Err(timeout)
+        let result: std::result::Result<
+            std::result::Result<(i32, String, String), std::io::Error>,
+            tokio::time::error::Elapsed,
+        > = match job.job_type {
+            JobType::Agent => {
+                let agent_executor = self.agent_executor.clone();
+                let agent_config = job.agent_config.clone();
+                let prompt = job.command.clone();
+                let wd = working_dir.to_string();
 
-            output
-        })
-        .await;
+                tokio::time::timeout(timeout, async move {
+                    let executor = agent_executor.ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            "No agent executor configured for agent-mode cron job",
+                        )
+                    })?;
+                    let config = agent_config.ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            "Agent job missing agent_config",
+                        )
+                    })?;
+                    match executor.execute(&config, &prompt, &wd).await {
+                        Ok(text) => Ok((0, text, String::new())),
+                        Err(e) => Ok((1, String::new(), e)),
+                    }
+                })
+                .await
+            }
+            JobType::Shell => {
+                tokio::time::timeout(timeout, async {
+                    let output = Command::new("sh")
+                        .arg("-c")
+                        .arg(&job.command)
+                        .current_dir(working_dir)
+                        .envs(job.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+                        .output()
+                        .await?;
+                    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                    let exit_code = output.status.code().unwrap_or(-1);
+                    Ok((exit_code, stdout, stderr))
+                })
+                .await
+            }
+        };
 
         // Process result
         execution = match result {
-            Ok(Ok(output)) => {
-                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                let exit_code = output.status.code().unwrap_or(-1);
-
+            Ok(Ok((exit_code, stdout, stderr))) => {
                 execution.complete(exit_code, stdout, stderr)
             }
             Ok(Err(e)) => execution.fail(format!("Failed to execute command: {}", e)),
@@ -351,6 +421,7 @@ impl CronManager {
         let event_tx = self.event_tx.clone();
         let running = self.running.clone();
         let workspace = self.workspace.clone();
+        let agent_executor = self.agent_executor.clone();
 
         tokio::spawn(async move {
             let mut ticker = interval(Duration::from_secs(60));
@@ -390,6 +461,7 @@ impl CronManager {
                                 event_tx: event_tx.clone(),
                                 running: running.clone(),
                                 workspace: workspace.clone(),
+                                agent_executor: agent_executor.clone(),
                             };
 
                             if let Err(e) = manager.execute_job(&job).await {
@@ -611,5 +683,134 @@ mod tests {
             }
             _ => panic!("Expected JobStarted event"),
         }
+    }
+
+    // --- Agent-mode tests ---
+
+    /// Mock agent executor for testing
+    struct MockAgentExecutor {
+        response: String,
+        should_fail: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl AgentExecutor for MockAgentExecutor {
+        async fn execute(
+            &self,
+            _config: &AgentJobConfig,
+            _prompt: &str,
+            _working_dir: &str,
+        ) -> std::result::Result<String, String> {
+            if self.should_fail {
+                Err("Mock agent error".to_string())
+            } else {
+                Ok(self.response.clone())
+            }
+        }
+    }
+
+    fn create_agent_config() -> AgentJobConfig {
+        AgentJobConfig {
+            model: "test-model".to_string(),
+            api_key: "test-key".to_string(),
+            workspace: None,
+            system_prompt: None,
+            base_url: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_add_agent_job() {
+        let manager = create_test_manager();
+
+        let job = manager
+            .add_agent_job("agent-task", "*/5 * * * *", "Refactor auth module", create_agent_config())
+            .await
+            .unwrap();
+
+        assert_eq!(job.name, "agent-task");
+        assert_eq!(job.job_type, JobType::Agent);
+        assert_eq!(job.command, "Refactor auth module");
+        assert!(job.agent_config.is_some());
+        assert!(job.next_run.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_add_agent_job_duplicate_name() {
+        let manager = create_test_manager();
+
+        manager
+            .add_agent_job("unique-agent", "* * * * *", "prompt", create_agent_config())
+            .await
+            .unwrap();
+
+        let result = manager
+            .add_agent_job("unique-agent", "* * * * *", "prompt2", create_agent_config())
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_run_agent_job_success() {
+        let store = Arc::new(MemoryCronStore::new());
+        let mut manager = CronManager::with_store(store, "/tmp".to_string());
+        manager.set_agent_executor(Arc::new(MockAgentExecutor {
+            response: "Refactored 3 files".to_string(),
+            should_fail: false,
+        }));
+
+        let job = manager
+            .add_agent_job("agent-run", "* * * * *", "Refactor auth", create_agent_config())
+            .await
+            .unwrap();
+
+        let execution = manager.run_job(&job.id).await.unwrap();
+        assert_eq!(execution.status, crate::types::ExecutionStatus::Success);
+        assert!(execution.stdout.contains("Refactored 3 files"));
+    }
+
+    #[tokio::test]
+    async fn test_run_agent_job_failure() {
+        let store = Arc::new(MemoryCronStore::new());
+        let mut manager = CronManager::with_store(store, "/tmp".to_string());
+        manager.set_agent_executor(Arc::new(MockAgentExecutor {
+            response: String::new(),
+            should_fail: true,
+        }));
+
+        let job = manager
+            .add_agent_job("agent-fail", "* * * * *", "Bad prompt", create_agent_config())
+            .await
+            .unwrap();
+
+        let execution = manager.run_job(&job.id).await.unwrap();
+        assert_eq!(execution.status, crate::types::ExecutionStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn test_run_agent_job_no_executor() {
+        let manager = create_test_manager();
+
+        let job = manager
+            .add_agent_job("no-executor", "* * * * *", "prompt", create_agent_config())
+            .await
+            .unwrap();
+
+        let execution = manager.run_job(&job.id).await.unwrap();
+        assert_eq!(execution.status, crate::types::ExecutionStatus::Failed);
+        assert!(execution.error.as_deref().unwrap_or("").contains("No agent executor"));
+    }
+
+    #[tokio::test]
+    async fn test_shell_job_type_default() {
+        let manager = create_test_manager();
+
+        let job = manager
+            .add_job("shell-default", "* * * * *", "echo hello")
+            .await
+            .unwrap();
+
+        assert_eq!(job.job_type, JobType::Shell);
+        assert!(job.agent_config.is_none());
     }
 }

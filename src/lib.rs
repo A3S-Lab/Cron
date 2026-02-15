@@ -39,4 +39,4 @@ pub use natural::parse_natural;
 pub use parser::CronExpression;
 pub use scheduler::{CronManager, SchedulerEvent};
 pub use store::{CronStore, FileCronStore, MemoryCronStore};
-pub use types::{CronError, CronJob, ExecutionStatus, JobExecution, JobStatus, Result};
+pub use types::{AgentExecutor, AgentJobConfig, CronError, CronJob, ExecutionStatus, JobExecution, JobStatus, JobType, Result};

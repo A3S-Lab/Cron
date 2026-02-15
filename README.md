@@ -12,7 +12,8 @@ Cron scheduling library for A3S with natural language support.
 - **Persistence**: JSON file-based storage with pluggable backends
 - **CRUD Operations**: Create, pause, resume, update, and remove jobs
 - **Execution History**: Track job runs with output and status
-- **71 Unit Tests**: Comprehensive test coverage
+- **Agent-Mode Jobs**: Schedule AI agent prompts alongside shell commands via `AgentExecutor` trait
+- **85 Unit Tests**: Comprehensive test coverage
 
 ## Installation
 
@@ -22,6 +23,8 @@ a3s-cron = "0.1"
 ```
 
 ## Library Usage
+
+### Shell Jobs
 
 ```rust
 use a3s_cron::{CronManager, FileCronStore, parse_natural};
@@ -33,10 +36,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cron = parse_natural("每天凌晨2点")?;        // Returns "0 2 * * *"
 
     // Create a manager with file-based storage
-    let store = FileCronStore::new("/path/to/storage").await?;
-    let manager = CronManager::new(store);
+    let manager = CronManager::new("/path/to/workspace").await?;
 
-    // Add a job
+    // Add a shell job
     let job = manager.add_job("backup", "0 2 * * *", "backup.sh").await?;
 
     // List jobs
@@ -52,6 +54,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Get execution history
     let history = manager.get_history(&job.id, 10).await?;
+
+    Ok(())
+}
+```
+
+### Agent-Mode Jobs
+
+```rust
+use a3s_cron::{CronManager, AgentJobConfig, AgentExecutor};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut manager = CronManager::new("/path/to/workspace").await?;
+
+    // Set an agent executor (implement AgentExecutor trait)
+    // manager.set_agent_executor(Arc::new(MyAgentExecutor::new()));
+
+    // Add an agent-mode job — the command is used as the agent prompt
+    let config = AgentJobConfig {
+        model: "claude-sonnet-4-20250514".to_string(),
+        api_key: "sk-ant-...".to_string(),
+        workspace: None,
+        system_prompt: None,
+        base_url: None,
+    };
+    let job = manager.add_agent_job(
+        "daily-review",
+        "0 9 * * 1-5",
+        "Review open PRs and summarize status",
+        config,
+    ).await?;
+
+    // Start the scheduler
+    manager.start().await?;
 
     Ok(())
 }
@@ -153,11 +189,12 @@ Special characters:
 a3s-cron/
 ├── src/
 │   ├── lib.rs        # Public API
-│   ├── types.rs      # CronJob, JobStatus, JobExecution
+│   ├── types.rs      # CronJob, JobType, AgentJobConfig, AgentExecutor
 │   ├── parser.rs     # Cron expression parser
 │   ├── natural.rs    # Natural language parser
 │   ├── store.rs      # CronStore trait, FileCronStore, MemoryCronStore
-│   └── scheduler.rs  # CronManager with CRUD operations
+│   ├── scheduler.rs  # CronManager with CRUD + agent-mode execution
+│   └── telemetry.rs  # OpenTelemetry metrics and spans
 └── Cargo.toml
 ```
 
@@ -171,7 +208,8 @@ a3s-cron/
 - [x] CRUD operations (create, pause, resume, update, remove)
 - [x] Execution history tracking with output and status
 - [x] CLI integration via a3s-tools
-- [x] 71 comprehensive unit tests
+- [x] Agent-mode jobs via `AgentExecutor` trait (Shell + Agent job types)
+- [x] 85 comprehensive unit tests
 
 ### Phase 2: Distributed Scheduling 📋
 

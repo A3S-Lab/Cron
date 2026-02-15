@@ -8,6 +8,21 @@ use uuid::Uuid;
 /// Result type alias for cron operations
 pub type Result<T> = std::result::Result<T, CronError>;
 
+/// Trait for executing agent-mode cron jobs.
+///
+/// Implement this trait to provide agent execution capabilities to the cron
+/// scheduler. The server crate implements this using `a3s-code-core::Agent`.
+#[async_trait::async_trait]
+pub trait AgentExecutor: Send + Sync {
+    /// Execute an agent prompt and return the text result.
+    async fn execute(
+        &self,
+        config: &AgentJobConfig,
+        prompt: &str,
+        working_dir: &str,
+    ) -> std::result::Result<String, String>;
+}
+
 /// Cron library errors
 #[derive(Debug, Error)]
 pub enum CronError {
@@ -56,6 +71,49 @@ pub enum JobStatus {
     Running,
 }
 
+/// Job type — determines how the command is executed
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum JobType {
+    /// Execute as a shell command via `sh -c`
+    Shell,
+    /// Execute as an agent prompt via `Agent::send()`
+    Agent,
+}
+
+impl Default for JobType {
+    fn default() -> Self {
+        Self::Shell
+    }
+}
+
+impl std::fmt::Display for JobType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            JobType::Shell => write!(f, "shell"),
+            JobType::Agent => write!(f, "agent"),
+        }
+    }
+}
+
+/// Agent configuration for agent-mode cron jobs
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentJobConfig {
+    /// LLM model identifier (e.g., "claude-sonnet-4-20250514")
+    pub model: String,
+    /// API key for the LLM provider
+    pub api_key: String,
+    /// Workspace directory (defaults to job working_dir)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
+    /// System prompt override
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
+    /// Base URL override for the LLM API
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+}
+
 impl std::fmt::Display for JobStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -78,8 +136,16 @@ pub struct CronJob {
     /// Cron schedule expression (5 fields: min hour day month weekday)
     pub schedule: String,
 
-    /// Command to execute
+    /// Command to execute (shell command or agent prompt, depending on job_type)
     pub command: String,
+
+    /// Job type: shell (default) or agent
+    #[serde(default)]
+    pub job_type: JobType,
+
+    /// Agent configuration (required when job_type is Agent)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_config: Option<AgentJobConfig>,
 
     /// Current job status
     pub status: JobStatus,
@@ -129,6 +195,8 @@ impl CronJob {
             name: name.into(),
             schedule: schedule.into(),
             command: command.into(),
+            job_type: JobType::default(),
+            agent_config: None,
             status: JobStatus::Active,
             timeout_ms: 60_000,
             created_at: now,
